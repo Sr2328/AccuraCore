@@ -1684,6 +1684,9 @@ export type Database = {
         Returns: void
       }
     }
+
+
+
     Enums: {
       app_role:
       | "admin"

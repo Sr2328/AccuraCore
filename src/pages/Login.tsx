@@ -469,7 +469,7 @@ const Login = () => {
           </div>
 
           <div className="ac-footer">
-            © 2025 Accura Precision Engineering Pvt. Ltd. · Gurugram, Haryana
+            © 2026 Accura Precision Engineering Pvt. Ltd. · Gurugram, Haryana
           </div>
         </div>
 

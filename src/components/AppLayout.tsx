@@ -10,6 +10,7 @@ import {
   FileText, MessageSquare, Settings, Briefcase, AlertCircle,
   TrendingUp, TrendingDown, CreditCard, ChevronRight,
   HelpCircle,
+  Layers,
 } from "lucide-react";
 
 interface NavItem { label: string; path: string; icon: React.ElementType; }
@@ -56,6 +57,7 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { label: "Suppliers", path: "/procurement/suppliers", icon: Users },
     { label: "Tasks", path: "/procurement/tasks", icon: ClipboardList },
     { label: "Messages", path: "/messages", icon: MessageSquare },
+    { label: "APEPL", path: "/apepl", icon: Layers }
   ],
   employee: [
     { label: "Dashboard", path: "/employee", icon: LayoutDashboard },

@@ -1,14 +1,14 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
-import { useAuth, type UserRole, getRoleLabel } from "@/lib/auth-context";
+import { type UserRole, getRoleLabel } from "@/lib/auth-context";
 import { toast } from "sonner";
 import { format } from "date-fns";
 import { exportToCSV } from "@/lib/export-utils";
 import {
   Search, Plus, Edit2, Trash2, KeyRound, Users, Mail, Phone,
   Building2, Briefcase, Clock, Shield, Eye, UserCheck, UserX,
-  Download, X, Loader2, ChevronRight, ChevronDown,
+  Download, X, Loader2, ChevronDown, Crown, User, Layers,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -20,12 +20,26 @@ const inputCls = "w-full px-3 py-2 bg-neutral-50 dark:bg-neutral-800 border bord
 const labelCls = "block text-xs font-medium text-neutral-500 dark:text-neutral-400 mb-1";
 
 /* ══════════════════════════════════════════════
-   CONSTANTS
+   ROLE CONSTANTS
 ══════════════════════════════════════════════ */
 const ROLES: UserRole[] = [
   "admin", "hr", "security", "procurement", "employee",
   "toolroom_high", "moulding_high", "ref_person", "store",
   "accountant", "cad_cam", "tool_room_head",
+];
+
+/* Role → category mapping */
+const HIGHER_AUTHORITY_ROLES = new Set(["admin", "hr", "toolroom_high", "moulding_high", "tool_room_head", "ref_person"]);
+const DEPARTMENT_ROLES = new Set(["procurement", "security", "store", "accountant", "cad_cam"]);
+const EMPLOYEE_ROLES = new Set(["employee"]);
+
+type CategoryKey = "all" | "employee" | "higher_authority" | "department";
+
+const CATEGORIES: { key: CategoryKey; label: string; icon: any; color: string; bg: string; border: string }[] = [
+  { key: "all", label: "All Users", icon: Users, color: "text-neutral-700 dark:text-neutral-200", bg: "bg-neutral-100 dark:bg-neutral-800", border: "border-neutral-200 dark:border-neutral-700" },
+  { key: "employee", label: "Employee", icon: User, color: "text-blue-600 dark:text-blue-400", bg: "bg-blue-50 dark:bg-blue-900/20", border: "border-blue-100 dark:border-blue-900/40" },
+  { key: "higher_authority", label: "Higher Authority", icon: Crown, color: "text-amber-600 dark:text-amber-400", bg: "bg-amber-50 dark:bg-amber-900/20", border: "border-amber-100 dark:border-amber-900/40" },
+  { key: "department", label: "Department Staff", icon: Layers, color: "text-violet-600 dark:text-violet-400", bg: "bg-violet-50 dark:bg-violet-900/20", border: "border-violet-100 dark:border-violet-900/40" },
 ];
 
 const ROLE_CFG: Record<string, { label: string; cls: string; dot: string }> = {
@@ -56,6 +70,12 @@ const generateUserId = (name: string) =>
 
 const inr = (n?: number | null) =>
   n != null ? `₹${Number(n).toLocaleString("en-IN")}` : "—";
+
+const getRoleCategory = (role: string): CategoryKey => {
+  if (HIGHER_AUTHORITY_ROLES.has(role)) return "higher_authority";
+  if (DEPARTMENT_ROLES.has(role)) return "department";
+  return "employee";
+};
 
 /* ══════════════════════════════════════════════
    HELPERS
@@ -98,7 +118,6 @@ const Modal = ({ title, onClose, children, footer, wide }: {
   </div>
 );
 
-/* Field primitives */
 const Field = ({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) => (
   <div>
     <label className={labelCls}>{label}{required && <span className="text-red-500 ml-0.5">*</span>}</label>
@@ -106,11 +125,19 @@ const Field = ({ label, required, children }: { label: string; required?: boolea
   </div>
 );
 
-const TextInput = ({ value, onChange, placeholder, type = "text" }: {
-  value: string; onChange: (v: string) => void; placeholder?: string; type?: string;
+const TextInput = ({ value, onChange, placeholder, type = "text", readOnly, disabled }: {
+  value: string; onChange: (v: string) => void; placeholder?: string;
+  type?: string; readOnly?: boolean; disabled?: boolean;
 }) => (
-  <input type={type} value={value} onChange={e => onChange(e.target.value)}
-    placeholder={placeholder} className={inputCls} />
+  <input
+    type={type}
+    value={value}
+    onChange={e => onChange(e.target.value)}
+    placeholder={placeholder}
+    readOnly={readOnly}
+    disabled={disabled}
+    className={cn(inputCls, (readOnly || disabled) && "opacity-50 cursor-not-allowed")}
+  />
 );
 
 const SelectInput = ({ value, onChange, options }: {
@@ -149,13 +176,14 @@ async function callEdge(payload: any) {
    MAIN PAGE
 ══════════════════════════════════════════════ */
 export default function UserManagement() {
-  const { user } = useAuth();
   const qc = useQueryClient();
 
   /* View state */
   const [search, setSearch] = useState("");
-  const [roleFilter, setRoleFilter] = useState("all");
+  const [category, setCategory] = useState<CategoryKey>("all");
+  const [deptFilter, setDeptFilter] = useState("all");
   const [statusFilter, setStatus] = useState("all");
+  const [roleFilter, setRoleFilter] = useState("all"); // sub-role filter within category
   const [showCreate, setShowCreate] = useState(false);
   const [editUser, setEditUser] = useState<any>(null);
   const [viewUser, setViewUser] = useState<any>(null);
@@ -175,19 +203,32 @@ export default function UserManagement() {
   const { data: profiles = [], isLoading } = useQuery({
     queryKey: ["admin-profiles"],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("profiles")
-        .select(`
-    id, user_id_custom, name, email, phone,
-    designation, shift, department_id, joining_date,
-    basic_salary, address, gender, blood_group,
-    is_active, created_at,
-    departments!profiles_department_id_fkey(id, name),
-    user_roles!user_roles_user_id_fkey(role)
-  `)
-        .order("created_at", { ascending: false });
-      if (error) throw error;
-      return data || [];
+      // profiles.id === auth.users.id === user_roles.user_id
+      // No direct FK between profiles and user_roles, so fetch separately
+      const [{ data: profileData, error: profileError }, { data: rolesData, error: rolesError }] =
+        await Promise.all([
+          supabase
+            .from("profiles")
+            .select(
+              "id, user_id_custom, name, email, phone, designation, shift, department_id, joining_date, basic_salary, address, gender, blood_group, is_active, created_at, departments!profiles_department_id_fkey(id, name)"
+            )
+            .order("name", { ascending: true }),
+          supabase.from("user_roles").select("user_id, role"),
+        ]);
+
+      if (profileError) throw profileError;
+      if (rolesError) throw rolesError;
+
+      // Build lookup: user_id -> role
+      const roleMap: Record<string, string> = {};
+      (rolesData ?? []).forEach((r: any) => { roleMap[r.user_id] = r.role; });
+
+      return (profileData ?? []).map((p: any) => ({
+        ...p,
+        _role: roleMap[p.id] ?? "employee",
+        _active: p.is_active !== false,
+        _dept: (p.departments as any)?.name ?? "",
+      }));
     },
   });
 
@@ -270,12 +311,11 @@ export default function UserManagement() {
     onError: (e: any) => setError(e.message),
   });
 
-  /* Toggle active */
   const toggleActive = useMutation({
     mutationFn: async (p: any) => {
       const { error } = await supabase
         .from("profiles")
-        .update({ is_active: !p.is_active })
+        .update({ is_active: !p._active })
         .eq("id", p.id);
       if (error) throw error;
     },
@@ -293,7 +333,7 @@ export default function UserManagement() {
       name: p.name ?? "",
       email: p.email ?? "",
       password: "",
-      role: p.user_roles?.[0]?.role ?? "employee",
+      role: p._role,
       dept_id: p.department_id ?? "",
       designation: p.designation ?? "",
       shift: p.shift ?? "General",
@@ -303,13 +343,18 @@ export default function UserManagement() {
     setError("");
   };
 
-  /* Filter */
+  /* ── Filter logic ── */
   const filtered = (profiles as any[]).filter(p => {
-    const role = p.user_roles?.[0]?.role ?? "employee";
-    const active = p.is_active !== false;
-    if (roleFilter !== "all" && role !== roleFilter) return false;
-    if (statusFilter === "active" && !active) return false;
-    if (statusFilter === "inactive" && active) return false;
+    // Category filter
+    if (category !== "all" && getRoleCategory(p._role) !== category) return false;
+    // Sub-role filter
+    if (roleFilter !== "all" && p._role !== roleFilter) return false;
+    // Department filter
+    if (deptFilter !== "all" && p.department_id !== deptFilter) return false;
+    // Status filter
+    if (statusFilter === "active" && !p._active) return false;
+    if (statusFilter === "inactive" && p._active) return false;
+    // Search
     if (search.trim()) {
       const q = search.toLowerCase();
       return (
@@ -317,21 +362,32 @@ export default function UserManagement() {
         (p.user_id_custom ?? "").toLowerCase().includes(q) ||
         (p.email ?? "").toLowerCase().includes(q) ||
         (p.designation ?? "").toLowerCase().includes(q) ||
-        (p.departments?.name ?? "").toLowerCase().includes(q)
+        (p._dept ?? "").toLowerCase().includes(q)
       );
     }
     return true;
   });
 
   /* Stats */
-  const totalActive = (profiles as any[]).filter(p => p.is_active !== false).length;
-  const totalInactive = (profiles as any[]).filter(p => p.is_active === false).length;
+  const totalActive = (profiles as any[]).filter(p => p._active).length;
+  const totalInactive = (profiles as any[]).filter(p => !p._active).length;
 
-  /* Role category counts */
-  const roleCounts = ROLES.reduce((acc, r) => {
-    acc[r] = (profiles as any[]).filter(p => (p.user_roles?.[0]?.role ?? "employee") === r).length;
-    return acc;
-  }, {} as Record<string, number>);
+  /* Category counts */
+  const categoryCounts: Record<CategoryKey, number> = {
+    all: (profiles as any[]).length,
+    employee: (profiles as any[]).filter(p => getRoleCategory(p._role) === "employee").length,
+    higher_authority: (profiles as any[]).filter(p => getRoleCategory(p._role) === "higher_authority").length,
+    department: (profiles as any[]).filter(p => getRoleCategory(p._role) === "department").length,
+  };
+
+  /* Roles to show as sub-filters within current category */
+  const subRoles = ROLES.filter(r => {
+    if (category === "all") return true;
+    if (category === "employee") return EMPLOYEE_ROLES.has(r);
+    if (category === "higher_authority") return HIGHER_AUTHORITY_ROLES.has(r);
+    if (category === "department") return DEPARTMENT_ROLES.has(r);
+    return false;
+  }).filter(r => (profiles as any[]).some(p => p._role === r));
 
   /* Export */
   const doExport = () => {
@@ -341,11 +397,11 @@ export default function UserManagement() {
       p.user_id_custom ?? "",
       p.email ?? "",
       p.phone ?? "",
-      getRoleLabel(p.user_roles?.[0]?.role ?? "employee"),
-      p.departments?.name ?? "",
+      getRoleLabel(p._role),
+      p._dept,
       p.designation ?? "",
       p.shift ?? "",
-      p.is_active !== false ? "Active" : "Inactive",
+      p._active ? "Active" : "Inactive",
       p.joining_date ? format(new Date(p.joining_date), "dd MMM yyyy") : "",
       p.basic_salary != null ? String(p.basic_salary) : "",
     ]);
@@ -353,7 +409,7 @@ export default function UserManagement() {
     toast.success(`Exported ${rows.length} users`);
   };
 
-  /* Shared form fields for create/edit */
+  /* Shared form fields */
   const CommonFields = ({ isCreate = false }) => (
     <>
       <div className="grid grid-cols-2 gap-3">
@@ -362,15 +418,16 @@ export default function UserManagement() {
             onChange={v => { setF("name")(v); if (isCreate && !form.custom_id) setF("custom_id")(generateUserId(v)); }}
             placeholder="Ramesh Gupta" />
         </Field>
-        {isCreate ? (
-          <Field label="Email" required>
-            <TextInput value={form.email} onChange={setF("email")} type="email" placeholder="ramesh@accura.in" />
-          </Field>
-        ) : (
-          <Field label="Phone">
-            <TextInput value={form.phone} onChange={setF("phone")} placeholder="+91 9XXXXXXXX" />
-          </Field>
-        )}
+        <Field label="Email" required={isCreate}>
+          <TextInput
+            value={form.email}
+            onChange={setF("email")}
+            type="email"
+            placeholder="ramesh@accura.in"
+            readOnly={!isCreate}
+            disabled={!isCreate}
+          />
+        </Field>
       </div>
 
       {isCreate && (
@@ -384,10 +441,29 @@ export default function UserManagement() {
         </div>
       )}
 
+      {/* Role selector with category grouping */}
       <div className="grid grid-cols-2 gap-3">
         <Field label="Role">
-          <SelectInput value={form.role} onChange={v => setF("role")(v)}
-            options={ROLES.map(r => ({ value: r, label: getRoleLabel(r) }))} />
+          <select value={form.role} onChange={e => setF("role")(e.target.value)} className={inputCls}>
+            <optgroup label="── Employee">
+              <option value="employee">Employee</option>
+            </optgroup>
+            <optgroup label="── Higher Authority">
+              <option value="admin">Admin</option>
+              <option value="hr">HR</option>
+              <option value="toolroom_high">Tool Room HA</option>
+              <option value="moulding_high">Moulding HA</option>
+              <option value="tool_room_head">Tool Room Head</option>
+              <option value="ref_person">Ref Person</option>
+            </optgroup>
+            <optgroup label="── Department Staff">
+              <option value="procurement">Procurement</option>
+              <option value="security">Security</option>
+              <option value="store">Store</option>
+              <option value="accountant">Accountant</option>
+              <option value="cad_cam">CAD/CAM</option>
+            </optgroup>
+          </select>
         </Field>
         <Field label="Department">
           <SelectInput value={form.dept_id} onChange={setF("dept_id")}
@@ -407,16 +483,9 @@ export default function UserManagement() {
             { value: "Night", label: "Night (10–6)" },
           ]} />
         </Field>
-        {!isCreate && (
-          <Field label="Phone">
-            <TextInput value={form.phone} onChange={setF("phone")} placeholder="+91..." />
-          </Field>
-        )}
-        {isCreate && (
-          <Field label="Phone">
-            <TextInput value={form.phone} onChange={setF("phone")} placeholder="+91..." />
-          </Field>
-        )}
+        <Field label="Phone">
+          <TextInput value={form.phone} onChange={setF("phone")} placeholder="+91..." />
+        </Field>
       </div>
     </>
   );
@@ -451,7 +520,7 @@ export default function UserManagement() {
             { label: "Total", value: (profiles as any[]).length, color: "text-neutral-900 dark:text-white", icon: Users, bg: "bg-neutral-50 dark:bg-neutral-800", border: "border-neutral-100 dark:border-neutral-700" },
             { label: "Active", value: totalActive, color: "text-emerald-600 dark:text-emerald-400", icon: UserCheck, bg: "bg-emerald-50 dark:bg-emerald-900/20", border: "border-emerald-100 dark:border-emerald-900/40" },
             { label: "Inactive", value: totalInactive, color: "text-red-500 dark:text-red-400", icon: UserX, bg: "bg-red-50 dark:bg-red-900/20", border: "border-red-100 dark:border-red-900/40" },
-            { label: "Admins", value: roleCounts["admin"] ?? 0, color: "text-red-600 dark:text-red-400", icon: Shield, bg: "bg-red-50 dark:bg-red-900/20", border: "border-red-100 dark:border-red-900/40" },
+            { label: "Admins", value: (profiles as any[]).filter(p => p._role === "admin").length, color: "text-red-600 dark:text-red-400", icon: Shield, bg: "bg-red-50 dark:bg-red-900/20", border: "border-red-100 dark:border-red-900/40" },
           ].map(s => (
             <div key={s.label} className={cn(CARD, "p-4 flex items-center gap-3")}>
               <div className={cn("w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 border", s.bg, s.border)}>
@@ -465,36 +534,70 @@ export default function UserManagement() {
           ))}
         </div>
 
-        {/* ── Role category pills ── */}
-        <div className="flex gap-2 flex-wrap">
-          <button onClick={() => setRoleFilter("all")}
-            className={cn("px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all",
-              roleFilter === "all"
-                ? "bg-[#EAB308] border-[#EAB308] text-black"
-                : "bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 hover:border-[#EAB308]/40")}>
-            All ({(profiles as any[]).length})
-          </button>
-          {ROLES.filter(r => (roleCounts[r] ?? 0) > 0).map(r => {
-            const cfg = ROLE_CFG[r] ?? ROLE_CFG.employee;
+        {/* ══ CATEGORY TABS ══ */}
+        <div className={cn(CARD, "p-1.5 flex gap-1.5 overflow-x-auto")}>
+          {CATEGORIES.map(cat => {
+            const Icon = cat.icon;
+            const active = category === cat.key;
             return (
-              <button key={r} onClick={() => setRoleFilter(roleFilter === r ? "all" : r)}
-                className={cn("px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all",
-                  roleFilter === r
-                    ? cn(cfg.cls, "ring-2 ring-offset-1 ring-[#EAB308]")
-                    : "bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 hover:border-neutral-300 dark:hover:border-neutral-600"
+              <button
+                key={cat.key}
+                onClick={() => { setCategory(cat.key); setRoleFilter("all"); }}
+                className={cn(
+                  "flex-1 min-w-max flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-all",
+                  active
+                    ? cn(cat.bg, cat.color, cat.border, "border shadow-sm")
+                    : "text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 hover:bg-neutral-50 dark:hover:bg-neutral-800/60"
                 )}>
-                {cfg.label} ({roleCounts[r]})
+                <Icon className="w-4 h-4" strokeWidth={1.8} />
+                {cat.label}
+                <span className={cn(
+                  "px-1.5 py-0.5 rounded-md text-xs font-bold tabular-nums",
+                  active ? "bg-white/60 dark:bg-black/20" : "bg-neutral-100 dark:bg-neutral-800 text-neutral-500"
+                )}>
+                  {categoryCounts[cat.key]}
+                </span>
               </button>
             );
           })}
         </div>
 
-        {/* ── Search + status filter ── */}
+        {/* ── Sub-role pills (only when > 1 role in category) ── */}
+        {subRoles.length > 1 && (
+          <div className="flex gap-2 flex-wrap">
+            <button
+              onClick={() => setRoleFilter("all")}
+              className={cn("px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all",
+                roleFilter === "all"
+                  ? "bg-[#EAB308] border-[#EAB308] text-black"
+                  : "bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 hover:border-[#EAB308]/40"
+              )}>
+              All Roles
+            </button>
+            {subRoles.map(r => {
+              const cfg = ROLE_CFG[r] ?? ROLE_CFG.employee;
+              const count = (profiles as any[]).filter(p => p._role === r).length;
+              return (
+                <button key={r} onClick={() => setRoleFilter(roleFilter === r ? "all" : r)}
+                  className={cn("px-3 py-1.5 rounded-xl border text-xs font-semibold transition-all",
+                    roleFilter === r
+                      ? cn(cfg.cls, "ring-2 ring-offset-1 ring-[#EAB308]")
+                      : "bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 hover:border-neutral-300 dark:hover:border-neutral-600"
+                  )}>
+                  {cfg.label} ({count})
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── Search bar + status + dept filter ── */}
         <div className="flex flex-col sm:flex-row gap-2">
+          {/* Search */}
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-300 dark:text-neutral-600" strokeWidth={1.8} />
             <input value={search} onChange={e => setSearch(e.target.value)}
-              placeholder="Search name, user ID, email, designation, department…"
+              placeholder="Search name, user ID, email, designation…"
               className="w-full pl-9 pr-8 py-2.5 bg-white dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-700 rounded-xl text-sm text-neutral-800 dark:text-white placeholder:text-neutral-300 dark:placeholder:text-neutral-600 focus:outline-none focus:border-[#EAB308]/60 transition-colors" />
             {search && (
               <button onClick={() => setSearch("")} className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-300 hover:text-neutral-500">
@@ -502,6 +605,23 @@ export default function UserManagement() {
               </button>
             )}
           </div>
+
+          {/* Department dropdown */}
+          <div className="relative">
+            <Building2 className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-300 dark:text-neutral-600 pointer-events-none" strokeWidth={1.8} />
+            <select
+              value={deptFilter}
+              onChange={e => setDeptFilter(e.target.value)}
+              className="pl-9 pr-8 py-2.5 bg-white dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-700 rounded-xl text-sm text-neutral-700 dark:text-neutral-300 focus:outline-none focus:border-[#EAB308]/60 transition-colors appearance-none cursor-pointer min-w-[160px]">
+              <option value="all">All Departments</option>
+              {(departments as any[]).map((d: any) => (
+                <option key={d.id} value={d.id}>{d.name}</option>
+              ))}
+            </select>
+            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-neutral-300 pointer-events-none" />
+          </div>
+
+          {/* Status toggle */}
           <div className="flex gap-1 bg-neutral-100 dark:bg-neutral-800 p-1 rounded-xl">
             {[
               { id: "all", label: "All" },
@@ -509,7 +629,7 @@ export default function UserManagement() {
               { id: "inactive", label: "Inactive" },
             ].map(t => (
               <button key={t.id} onClick={() => setStatus(t.id)}
-                className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold transition-all",
+                className={cn("px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap",
                   statusFilter === t.id
                     ? "bg-white dark:bg-neutral-700 text-neutral-900 dark:text-white shadow-sm"
                     : "text-neutral-400 dark:text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300"
@@ -524,7 +644,7 @@ export default function UserManagement() {
         <div className={cn(CARD, "overflow-hidden")}>
 
           {/* Column headers */}
-          <div className="hidden md:grid grid-cols-[2fr_1fr_1.2fr_1fr_1fr_1fr_120px] gap-3 px-5 py-3 border-b border-neutral-50 dark:border-neutral-800/60 bg-neutral-50/50 dark:bg-neutral-800/20">
+          <div className="hidden md:grid grid-cols-[2.2fr_1fr_1.2fr_1fr_1fr_1.1fr_120px] gap-3 px-5 py-3 border-b border-neutral-50 dark:border-neutral-800/60 bg-neutral-50/50 dark:bg-neutral-800/20">
             {["User", "User ID", "Department", "Designation", "Shift", "Role", "Actions"].map(h => (
               <span key={h} className="text-xs font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider">{h}</span>
             ))}
@@ -536,91 +656,86 @@ export default function UserManagement() {
               <p className="text-sm text-neutral-400 dark:text-neutral-500 mt-3">Loading users…</p>
             </div>
           ) : filtered.length > 0 ? (
-            filtered.map((p: any) => {
-              const role = p.user_roles?.[0]?.role ?? "employee";
-              const active = p.is_active !== false;
+            filtered.map((p: any) => (
+              <div key={p.id}
+                className="flex md:grid md:grid-cols-[2.2fr_1fr_1.2fr_1fr_1fr_1.1fr_120px] items-center gap-3 px-5 py-4 border-b border-neutral-50 dark:border-neutral-800/60 last:border-0 hover:bg-neutral-50/60 dark:hover:bg-neutral-800/30 transition-colors cursor-pointer"
+                onClick={() => setViewUser(p)}>
 
-              return (
-                <div key={p.id}
-                  className="flex md:grid md:grid-cols-[2fr_1fr_1.2fr_1fr_1fr_1fr_120px] items-center gap-3 px-5 py-4 border-b border-neutral-50 dark:border-neutral-800/60 last:border-0 hover:bg-neutral-50/60 dark:hover:bg-neutral-800/30 transition-colors group cursor-pointer"
-                  onClick={() => setViewUser(p)}>
-
-                  {/* User info */}
-                  <div className="flex items-center gap-3 min-w-0 flex-1 md:flex-none">
-                    <div className={cn("w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold text-white flex-shrink-0", avatarColor(p.name ?? ""))}>
-                      {(p.name ?? "?").charAt(0).toUpperCase()}
+                {/* User info */}
+                <div className="flex items-center gap-3 min-w-0 flex-1 md:flex-none">
+                  <div className={cn("w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold text-white flex-shrink-0", avatarColor(p.name ?? ""))}>
+                    {(p.name ?? "?").charAt(0).toUpperCase()}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="text-sm font-semibold text-neutral-800 dark:text-white truncate">{p.name ?? "—"}</p>
+                      <span className={cn("w-1.5 h-1.5 rounded-full flex-shrink-0", p._active ? "bg-emerald-500" : "bg-red-400")} />
                     </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <p className="text-sm font-semibold text-neutral-800 dark:text-white truncate">{p.name}</p>
-                        <span className={cn("w-1.5 h-1.5 rounded-full flex-shrink-0", active ? "bg-emerald-500" : "bg-red-400")} />
-                      </div>
-                      <p className="text-xs text-neutral-400 dark:text-neutral-500 truncate">{p.email ?? "—"}</p>
-                    </div>
-                  </div>
-
-                  {/* User ID */}
-                  <div className="hidden md:block">
-                    <code className="text-xs bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 px-2 py-0.5 rounded-lg font-mono">
-                      {p.user_id_custom ?? "—"}
-                    </code>
-                  </div>
-
-                  {/* Department */}
-                  <div className="hidden md:flex items-center gap-1.5 min-w-0">
-                    <Building2 className="w-3.5 h-3.5 text-neutral-300 dark:text-neutral-600 flex-shrink-0" strokeWidth={1.8} />
-                    <span className="text-sm text-neutral-500 dark:text-neutral-400 truncate">{p.departments?.name ?? "—"}</span>
-                  </div>
-
-                  {/* Designation */}
-                  <div className="hidden md:flex items-center gap-1.5 min-w-0">
-                    <Briefcase className="w-3.5 h-3.5 text-neutral-300 dark:text-neutral-600 flex-shrink-0" strokeWidth={1.8} />
-                    <span className="text-sm text-neutral-500 dark:text-neutral-400 truncate">{p.designation ?? "—"}</span>
-                  </div>
-
-                  {/* Shift */}
-                  <div className="hidden md:flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5 text-neutral-300 dark:text-neutral-600 flex-shrink-0" strokeWidth={1.8} />
-                    <span className="text-sm text-neutral-500 dark:text-neutral-400">{p.shift ?? "—"}</span>
-                  </div>
-
-                  {/* Role */}
-                  <div className="hidden md:block">
-                    <RoleBadge role={role} />
-                  </div>
-
-                  {/* Actions */}
-                  <div className="flex items-center gap-1 flex-shrink-0 ml-auto md:ml-0" onClick={e => e.stopPropagation()}>
-                    <button onClick={() => setViewUser(p)} title="View"
-                      className="w-8 h-8 rounded-lg flex items-center justify-center text-neutral-400 hover:text-[#EAB308] hover:bg-[#EAB308]/10 transition-colors">
-                      <Eye className="w-3.5 h-3.5" strokeWidth={1.8} />
-                    </button>
-                    <button onClick={() => openEdit(p)} title="Edit"
-                      className="w-8 h-8 rounded-lg flex items-center justify-center text-neutral-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors">
-                      <Edit2 className="w-3.5 h-3.5" strokeWidth={1.8} />
-                    </button>
-                    <button onClick={() => { setResetUser(p); setError(""); }} title="Reset Password"
-                      className="w-8 h-8 rounded-lg flex items-center justify-center text-neutral-400 hover:text-violet-500 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors">
-                      <KeyRound className="w-3.5 h-3.5" strokeWidth={1.8} />
-                    </button>
-                    <button onClick={() => toggleActive.mutate(p)} title={active ? "Deactivate" : "Activate"}
-                      className={cn("w-8 h-8 rounded-lg flex items-center justify-center transition-colors",
-                        active
-                          ? "text-neutral-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
-                          : "text-neutral-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20"
-                      )}>
-                      {active ? <UserX className="w-3.5 h-3.5" strokeWidth={1.8} /> : <UserCheck className="w-3.5 h-3.5" strokeWidth={1.8} />}
-                    </button>
-                    <button
-                      onClick={() => { if (confirm(`Delete ${p.name}? This cannot be undone.`)) deleteMutation.mutate(p.id); }}
-                      title="Delete"
-                      className="w-8 h-8 rounded-lg flex items-center justify-center text-neutral-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
-                      <Trash2 className="w-3.5 h-3.5" strokeWidth={1.8} />
-                    </button>
+                    <p className="text-xs text-neutral-400 dark:text-neutral-500 truncate">{p.email ?? "—"}</p>
                   </div>
                 </div>
-              );
-            })
+
+                {/* User ID */}
+                <div className="hidden md:block">
+                  <code className="text-xs bg-neutral-100 dark:bg-neutral-800 text-neutral-600 dark:text-neutral-300 px-2 py-0.5 rounded-lg font-mono">
+                    {p.user_id_custom ?? "—"}
+                  </code>
+                </div>
+
+                {/* Department */}
+                <div className="hidden md:flex items-center gap-1.5 min-w-0">
+                  <Building2 className="w-3.5 h-3.5 text-neutral-300 dark:text-neutral-600 flex-shrink-0" strokeWidth={1.8} />
+                  <span className="text-sm text-neutral-500 dark:text-neutral-400 truncate">{p._dept || "—"}</span>
+                </div>
+
+                {/* Designation */}
+                <div className="hidden md:flex items-center gap-1.5 min-w-0">
+                  <Briefcase className="w-3.5 h-3.5 text-neutral-300 dark:text-neutral-600 flex-shrink-0" strokeWidth={1.8} />
+                  <span className="text-sm text-neutral-500 dark:text-neutral-400 truncate">{p.designation ?? "—"}</span>
+                </div>
+
+                {/* Shift */}
+                <div className="hidden md:flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-neutral-300 dark:text-neutral-600 flex-shrink-0" strokeWidth={1.8} />
+                  <span className="text-sm text-neutral-500 dark:text-neutral-400">{p.shift ?? "—"}</span>
+                </div>
+
+                {/* Role */}
+                <div className="hidden md:block">
+                  <RoleBadge role={p._role} />
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-1 flex-shrink-0 ml-auto md:ml-0" onClick={e => e.stopPropagation()}>
+                  <button onClick={() => setViewUser(p)} title="View"
+                    className="w-8 h-8 rounded-lg flex items-center justify-center text-neutral-400 hover:text-[#EAB308] hover:bg-[#EAB308]/10 transition-colors">
+                    <Eye className="w-3.5 h-3.5" strokeWidth={1.8} />
+                  </button>
+                  <button onClick={() => openEdit(p)} title="Edit"
+                    className="w-8 h-8 rounded-lg flex items-center justify-center text-neutral-400 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors">
+                    <Edit2 className="w-3.5 h-3.5" strokeWidth={1.8} />
+                  </button>
+                  <button onClick={() => { setResetUser(p); setError(""); }} title="Reset Password"
+                    className="w-8 h-8 rounded-lg flex items-center justify-center text-neutral-400 hover:text-violet-500 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors">
+                    <KeyRound className="w-3.5 h-3.5" strokeWidth={1.8} />
+                  </button>
+                  <button onClick={() => toggleActive.mutate(p)} title={p._active ? "Deactivate" : "Activate"}
+                    className={cn("w-8 h-8 rounded-lg flex items-center justify-center transition-colors",
+                      p._active
+                        ? "text-neutral-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20"
+                        : "text-neutral-400 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20"
+                    )}>
+                    {p._active ? <UserX className="w-3.5 h-3.5" strokeWidth={1.8} /> : <UserCheck className="w-3.5 h-3.5" strokeWidth={1.8} />}
+                  </button>
+                  <button
+                    onClick={() => { if (confirm(`Delete ${p.name}? This cannot be undone.`)) deleteMutation.mutate(p.id); }}
+                    title="Delete"
+                    className="w-8 h-8 rounded-lg flex items-center justify-center text-neutral-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors">
+                    <Trash2 className="w-3.5 h-3.5" strokeWidth={1.8} />
+                  </button>
+                </div>
+              </div>
+            ))
           ) : (
             <div className="py-16 text-center">
               <Users className="w-10 h-10 text-neutral-300 dark:text-neutral-600 mx-auto mb-3" strokeWidth={1.5} />
@@ -685,17 +800,27 @@ export default function UserManagement() {
               <span className="text-sm text-red-600 dark:text-red-400">{error}</span>
             </div>
           )}
+          {/* Current role preview */}
+          <div className="flex items-center gap-2 p-3 bg-neutral-50 dark:bg-neutral-800/50 rounded-xl border border-neutral-100 dark:border-neutral-800">
+            <span className="text-xs text-neutral-500 dark:text-neutral-400">Current role:</span>
+            <RoleBadge role={editUser._role} />
+            {form.role !== editUser._role && (
+              <>
+                <span className="text-xs text-neutral-400">→</span>
+                <RoleBadge role={form.role} />
+                <span className="text-xs text-amber-500 font-medium ml-auto">Role will change</span>
+              </>
+            )}
+          </div>
           <CommonFields isCreate={false} />
         </Modal>
       )}
 
       {/* ══ VIEW MODAL ══ */}
       {viewUser && (() => {
-        const role = viewUser.user_roles?.[0]?.role ?? "employee";
-        const active = viewUser.is_active !== false;
+        const active = viewUser._active;
         return (
           <Modal title="User Details" onClose={() => setViewUser(null)}>
-            {/* Profile header */}
             <div className="flex items-center gap-4 p-4 bg-neutral-50 dark:bg-neutral-800/50 rounded-2xl border border-neutral-100 dark:border-neutral-800">
               <div className={cn("w-14 h-14 rounded-2xl flex items-center justify-center text-2xl font-black text-white flex-shrink-0", avatarColor(viewUser.name ?? ""))}>
                 {(viewUser.name ?? "?").charAt(0).toUpperCase()}
@@ -704,7 +829,7 @@ export default function UserManagement() {
                 <p className="text-lg font-bold text-neutral-900 dark:text-white">{viewUser.name}</p>
                 <p className="text-sm text-neutral-400 dark:text-neutral-500">{viewUser.designation ?? "No designation"}</p>
                 <div className="flex gap-2 mt-1.5 flex-wrap">
-                  <RoleBadge role={role} />
+                  <RoleBadge role={viewUser._role} />
                   <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-xs font-semibold",
                     active
                       ? "bg-emerald-50 dark:bg-emerald-900/20 text-emerald-600 dark:text-emerald-400 border-emerald-100 dark:border-emerald-900/40"
@@ -717,13 +842,12 @@ export default function UserManagement() {
               </div>
             </div>
 
-            {/* Details grid */}
             <div className="grid grid-cols-2 gap-2.5">
               {[
                 { icon: Mail, label: "Email", value: viewUser.email },
                 { icon: Phone, label: "Phone", value: viewUser.phone },
                 { icon: Users, label: "User ID", value: viewUser.user_id_custom, mono: true },
-                { icon: Building2, label: "Department", value: viewUser.departments?.name },
+                { icon: Building2, label: "Department", value: viewUser._dept || null },
                 { icon: Clock, label: "Shift", value: viewUser.shift },
                 { icon: Briefcase, label: "Joining Date", value: viewUser.joining_date ? format(new Date(viewUser.joining_date), "dd MMM yyyy") : null },
                 { icon: Shield, label: "Gender", value: viewUser.gender },
@@ -755,7 +879,6 @@ export default function UserManagement() {
               </div>
             )}
 
-            {/* Action buttons */}
             <div className="flex gap-2 pt-1">
               <button onClick={() => { setViewUser(null); openEdit(viewUser); }}
                 className="flex-1 flex items-center justify-center gap-1.5 py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 text-sm font-medium text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors">

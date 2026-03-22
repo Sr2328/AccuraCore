@@ -40,6 +40,7 @@ import ProcurementJobWork from "@/pages/procurement/JobWorkPage";
 import ProcurementRMBuying from "@/pages/procurement/RMBuyingPage";
 import ProcurementSuppliers from "@/pages/procurement/SuppliersPage";
 import ProcurementTasks from "@/pages/procurement/TasksPage";
+import APEPLPage from "@/pages/procurement/Apeplpage";
 
 import StoreDashboard from "@/pages/StoreDashboard";
 import StoreInventory from "@/pages/store/InventoryPage";
@@ -114,6 +115,7 @@ function AppRoutes() {
       <Route path="/procurement/buying" element={<ProtectedRoute><ProcurementRMBuying /></ProtectedRoute>} />
       <Route path="/procurement/suppliers" element={<ProtectedRoute><ProcurementSuppliers /></ProtectedRoute>} />
       <Route path="/procurement/tasks" element={<ProtectedRoute><ProcurementTasks /></ProtectedRoute>} />
+      <Route path="/apepl" element={<ProtectedRoute><APEPLPage /></ProtectedRoute>} />
 
       {/* ── Employee ── */}
       <Route path="/employee" element={<ProtectedRoute><EmployeeDashboard /></ProtectedRoute>} />
