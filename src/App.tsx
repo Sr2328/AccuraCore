@@ -41,6 +41,7 @@ import ProcurementRMBuying from "@/pages/procurement/RMBuyingPage";
 import ProcurementSuppliers from "@/pages/procurement/SuppliersPage";
 import ProcurementTasks from "@/pages/procurement/TasksPage";
 import APEPLPage from "@/pages/procurement/Apeplpage";
+import DocumentManagement from "./pages/procurement/Documentmanagement";
 
 import StoreDashboard from "@/pages/StoreDashboard";
 import StoreInventory from "@/pages/store/InventoryPage";
@@ -116,6 +117,7 @@ function AppRoutes() {
       <Route path="/procurement/suppliers" element={<ProtectedRoute><ProcurementSuppliers /></ProtectedRoute>} />
       <Route path="/procurement/tasks" element={<ProtectedRoute><ProcurementTasks /></ProtectedRoute>} />
       <Route path="/apepl" element={<ProtectedRoute><APEPLPage /></ProtectedRoute>} />
+      <Route path="/procurement/DocumentManagement" element={<ProtectedRoute><DocumentManagement /></ProtectedRoute>} />   {/* ✅ new route for documents */}
 
       {/* ── Employee ── */}
       <Route path="/employee" element={<ProtectedRoute><EmployeeDashboard /></ProtectedRoute>} />

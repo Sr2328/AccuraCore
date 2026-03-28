@@ -57,7 +57,8 @@ const NAV_BY_ROLE: Record<string, NavItem[]> = {
     { label: "Suppliers", path: "/procurement/suppliers", icon: Users },
     { label: "Tasks", path: "/procurement/tasks", icon: ClipboardList },
     { label: "Messages", path: "/messages", icon: MessageSquare },
-    { label: "APEPL", path: "/apepl", icon: Layers }
+    { label: "APEPL", path: "/apepl", icon: Layers },
+    { label: "Documents", path: "/procurement/DocumentManagement", icon: FileText }
   ],
   employee: [
     { label: "Dashboard", path: "/employee", icon: LayoutDashboard },
