@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { format, formatDistanceToNow } from "date-fns";
@@ -7,17 +7,29 @@ import {
   FileText, Phone, Mail, MessageSquare, CheckCircle2,
   Clock, Truck, RotateCcw, ShieldCheck, BadgeCheck,
   Receipt, X, Calendar, User, Package, Circle,
-  ChevronDown, Loader2, Upload, ArrowRight,
+  Loader2, ArrowRight, Upload, Printer, Trash2,
+  ChevronDown, ChevronUp, Check, Paperclip, Eye,
+  Building2, Hash,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 /* ══════════════════════════════════════════════
    TYPES
 ══════════════════════════════════════════════ */
+type MaterialLine = {
+  id: string;
+  material_name: string;
+  material_grade: string;
+  quantity: string;
+  unit: string;
+};
+
 type JobWork = {
   id: string; doc_no: string | null; division: string; process_type: string | null;
-  department_id: string | null; supplier_id: string | null; material_name: string;
-  material_grade: string | null; quantity: number; unit: string | null;
+  department_id: string | null; supplier_id: string | null;
+  material_name: string; material_grade: string | null;
+  quantity: number; unit: string | null;
+  materials_list?: MaterialLine[] | null;
   dispatch_purpose: string | null; responsible_person: string | null;
   requirement_doc_url: string | null; expected_return_date: string | null;
   dispatch_mode: string | null; delivery_person_name: string | null;
@@ -33,59 +45,29 @@ type JobWork = {
   invoice_number: string | null; invoice_amount: number | null; invoice_url: string | null;
   current_step: number | null; status: string | null; remarks: string | null;
   created_by: string | null; created_at: string | null; updated_at: string | null;
-  suppliers?: { id: string; name: string; contact_person?: string | null; phone?: string | null } | null;
+  suppliers?: { id: string; name: string; contact_person?: string | null; phone?: string | null; address?: string | null } | null;
   departments?: { name: string } | null;
 };
 
-type Supplier = { id: string; name: string; contact_person: string | null; phone: string | null };
+type Supplier = {
+  id: string; name: string; contact_person: string | null;
+  phone: string | null; address?: string | null;
+};
 
 /* ══════════════════════════════════════════════
    STEP CONFIG
 ══════════════════════════════════════════════ */
 const STEPS = [
-  { n: 1, label: "Requirement Created", status: "requirement", icon: FileText },
-  { n: 2, label: "Challan Created", status: "challan", icon: FileText },
-  { n: 3, label: "Security Handover", status: "security_handover", icon: ShieldCheck },
-  { n: 4, label: "Dispatched to Supplier", status: "dispatched", icon: Truck },
-  { n: 5, label: "In Process", status: "in_process", icon: Clock },
-  { n: 6, label: "Material Returned", status: "material_returned", icon: RotateCcw },
-  { n: 7, label: "Ref Person Approval", status: "ref_approved", icon: User },
-  { n: 8, label: "High Authority Approval", status: "ha_approved", icon: BadgeCheck },
-  { n: 9, label: "Closed · Invoice Received", status: "closed", icon: Receipt },
+  { n: 1, label: "Requirement Created", status: "requirement", icon: FileText, color: "blue" },
+  { n: 2, label: "Challan Created", status: "challan", icon: FileText, color: "indigo" },
+  { n: 3, label: "Security Handover", status: "security_handover", icon: ShieldCheck, color: "violet" },
+  { n: 4, label: "Dispatched to Supplier", status: "dispatched", icon: Truck, color: "orange" },
+  { n: 5, label: "In Process", status: "in_process", icon: Clock, color: "yellow" },
+  { n: 6, label: "Material Returned", status: "material_returned", icon: RotateCcw, color: "teal" },
+  { n: 7, label: "Ref Person Approval", status: "ref_approved", icon: User, color: "purple" },
+  { n: 8, label: "High Authority Approval", status: "ha_approved", icon: BadgeCheck, color: "green" },
+  { n: 9, label: "Closed · Invoice Received", status: "closed", icon: Receipt, color: "neutral" },
 ];
-
-/* Step-specific extra fields shown when advancing */
-const STEP_FIELDS: Record<number, { key: string; label: string; type: string; required?: boolean }[]> = {
-  2: [{ key: "challan_url", label: "Challan Document URL", type: "text" }],
-  3: [
-    { key: "security_handover_by", label: "Handed over by", type: "text" },
-    { key: "security_handover_at", label: "Handover date/time", type: "datetime-local" },
-  ],
-  4: [
-    { key: "dispatch_date", label: "Dispatch date", type: "date", required: true },
-    { key: "dispatch_mode", label: "Dispatch mode", type: "select:Road,Courier,Hand Delivery,Rail" },
-    { key: "vehicle_number", label: "Vehicle number", type: "text" },
-    { key: "delivery_person_name", label: "Delivery person", type: "text" },
-    { key: "outward_challan_url", label: "Outward challan URL", type: "text" },
-    { key: "expected_return_date", label: "Expected return date", type: "date" },
-    { key: "tat_days", label: "TAT days", type: "number" },
-  ],
-  6: [
-    { key: "return_date", label: "Return date", type: "date", required: true },
-    { key: "received_qty", label: "Received qty", type: "number", required: true },
-  ],
-  7: [
-    { key: "ref_person_remarks", label: "Ref person remarks", type: "textarea" },
-  ],
-  8: [
-    { key: "high_authority_remarks", label: "HA remarks", type: "textarea" },
-  ],
-  9: [
-    { key: "invoice_number", label: "Invoice number", type: "text" },
-    { key: "invoice_amount", label: "Invoice amount (₹)", type: "number" },
-    { key: "invoice_url", label: "Invoice URL", type: "text" },
-  ],
-};
 
 /* ══════════════════════════════════════════════
    STATUS CONFIG
@@ -115,6 +97,14 @@ const ft = (d?: string | null) => d ? format(new Date(d), "hh:mm a") : "";
 const fds = (d?: string | null) => d ? format(new Date(d), "dd.MM.yyyy") : "";
 const ago = (d?: string | null) => d ? formatDistanceToNow(new Date(d), { addSuffix: true }) : "";
 const inr = (n?: number | null) => n != null ? `₹${n.toLocaleString("en-IN")}` : "—";
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+const newMaterial = (): MaterialLine => ({
+  id: uid(), material_name: "", material_grade: "", quantity: "", unit: "pcs",
+});
+
+
+
 
 const stepTimestamp = (job: JobWork, n: number): string | null => {
   switch (n) {
@@ -146,24 +136,145 @@ const stepSub = (job: JobWork, n: number): string | null => {
   }
 };
 
+const getMaterialsList = (job: JobWork): MaterialLine[] => {
+  if (job.materials_list && Array.isArray(job.materials_list) && job.materials_list.length > 0) {
+    return job.materials_list;
+  }
+  return [{
+    id: "primary",
+    material_name: job.material_name,
+    material_grade: job.material_grade ?? "",
+    quantity: String(job.quantity),
+    unit: job.unit ?? "pcs",
+  }];
+};
+
 /* Build update payload when advancing step */
-const buildStepPayload = (nextStep: number, fields: Record<string, string>, job: JobWork): Record<string, any> => {
+const buildStepPayload = (nextStep: number, fields: Record<string, any>, job: JobWork): Record<string, any> => {
   const now = new Date().toISOString();
   const base: Record<string, any> = {
     current_step: nextStep,
     status: STEPS[nextStep - 1]?.status ?? "requirement",
     updated_at: now,
   };
-  // merge extra fields
   Object.entries(fields).forEach(([k, v]) => {
-    if (v !== "") base[k] = v;
+    if (v !== "" && v !== null && v !== undefined) base[k] = v;
   });
-  // step-specific auto fields
   if (nextStep === 3 && !base.security_handover_at) base.security_handover_at = now;
   if (nextStep === 7) { base.ref_person_approved = true; base.ref_person_approved_at = now; }
   if (nextStep === 8) { base.high_authority_approved = true; base.high_authority_approved_at = now; }
   if (nextStep === 9) { base.status = "closed"; }
   return base;
+};
+
+/* ══════════════════════════════════════════════
+   FILE UPLOAD COMPONENT
+══════════════════════════════════════════════ */
+/* file upload helper types */
+
+const FileUploadField = ({
+  label, value, onChange, bucket = "job-work-docs", folder = "misc", accept, required,
+}: {
+  label: string; value: string; onChange: (url: string) => void;
+  bucket?: string; folder?: string; accept?: string; required?: boolean;
+}) => {
+  const [dragging, setDragging] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [fileName, setFileName] = useState("");
+  const [error, setError] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const upload = async (file: File) => {
+    setUploading(true);
+    setError("");
+    setFileName(file.name);
+    try {
+      const ext = file.name.split(".").pop();
+      const path = `${folder}/${Date.now()}_${uid()}.${ext}`;
+      const { error: upErr } = await supabase.storage.from(bucket).upload(path, file, { upsert: true });
+      if (upErr) throw upErr;
+      const { data } = supabase.storage.from(bucket).getPublicUrl(path);
+      onChange(data.publicUrl);
+    } catch (e: any) {
+      setError(e.message ?? "Upload failed");
+      setFileName("");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const onDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) upload(file);
+  }, []);
+
+  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) upload(file);
+  };
+
+  return (
+    <div>
+      <label className="block text-xs font-medium text-neutral-500 dark:text-neutral-400 mb-1.5">
+        {label}{required && <span className="text-red-500 ml-0.5">*</span>}
+      </label>
+      {value ? (
+        <div className="flex items-center gap-3 p-3 bg-green-50 dark:bg-green-900/10 border border-green-200 dark:border-green-900/30 rounded-xl">
+          <div className="w-8 h-8 rounded-lg bg-green-100 dark:bg-green-900/30 flex items-center justify-center flex-shrink-0">
+            <Check className="w-4 h-4 text-green-600 dark:text-green-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-green-700 dark:text-green-300 truncate">{fileName || "File uploaded"}</p>
+            <a href={value} target="_blank" rel="noopener noreferrer"
+              className="text-xs text-green-600 dark:text-green-400 hover:underline flex items-center gap-1">
+              <Eye className="w-3 h-3" />View file
+            </a>
+          </div>
+          <button onClick={() => { onChange(""); setFileName(""); }}
+            className="w-6 h-6 rounded-lg hover:bg-green-200 dark:hover:bg-green-900/40 flex items-center justify-center text-green-600 dark:text-green-400 transition-colors">
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      ) : (
+        <div
+          onDragOver={e => { e.preventDefault(); setDragging(true); }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={onDrop}
+          onClick={() => inputRef.current?.click()}
+          className={cn(
+            "relative flex flex-col items-center justify-center gap-2 p-5 rounded-xl border-2 border-dashed cursor-pointer transition-all",
+            dragging
+              ? "border-[#EAB308] bg-yellow-50 dark:bg-yellow-900/10"
+              : "border-neutral-200 dark:border-neutral-700 bg-neutral-50 dark:bg-neutral-800/50 hover:border-[#EAB308]/50 hover:bg-yellow-50/30 dark:hover:bg-yellow-900/5"
+          )}>
+          <input ref={inputRef} type="file" accept={accept} onChange={onFileChange} className="hidden" />
+          {uploading ? (
+            <>
+              <Loader2 className="w-5 h-5 text-[#EAB308] animate-spin" />
+              <p className="text-xs text-neutral-500 dark:text-neutral-400">Uploading {fileName}…</p>
+            </>
+          ) : (
+            <>
+              <div className="w-9 h-9 rounded-xl bg-neutral-100 dark:bg-neutral-700 flex items-center justify-center">
+                <Upload className="w-4 h-4 text-neutral-400 dark:text-neutral-500" strokeWidth={1.8} />
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-medium text-neutral-600 dark:text-neutral-300">
+                  {dragging ? "Drop to upload" : "Click or drag file here"}
+                </p>
+                <p className="text-xs text-neutral-400 dark:text-neutral-500 mt-0.5">
+                  {accept ? accept.replace(/,/g, ", ") : "PDF, JPG, PNG, DOCX"} · Max 10MB
+                </p>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+      {error && <p className="mt-1.5 text-xs text-red-500 flex items-center gap-1"><AlertTriangle className="w-3 h-3" />{error}</p>}
+    </div>
+  );
 };
 
 /* ══════════════════════════════════════════════
@@ -196,7 +307,6 @@ const SC = ({ title, icon: Icon, children, action }: {
   </div>
 );
 
-/* Input primitives */
 const inputCls = "w-full px-3 py-2 bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-xl text-sm text-neutral-800 dark:text-white placeholder:text-neutral-400 dark:placeholder:text-neutral-600 focus:outline-none focus:border-[#EAB308]/60 transition-colors";
 const labelCls = "block text-xs font-medium text-neutral-500 dark:text-neutral-400 mb-1";
 
@@ -227,15 +337,18 @@ const Field = ({
 /* ══════════════════════════════════════════════
    MODAL WRAPPER
 ══════════════════════════════════════════════ */
-const Modal = ({ title, onClose, children, footer }: {
-  title: string; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode;
+const Modal = ({ title, onClose, children, footer, wide }: {
+  title: string; onClose: () => void; children: React.ReactNode; footer?: React.ReactNode; wide?: boolean;
 }) => (
   <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
     <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
-    <div className="relative z-10 w-full sm:max-w-lg bg-white dark:bg-neutral-900 rounded-t-3xl sm:rounded-2xl border border-neutral-100 dark:border-neutral-800 shadow-2xl max-h-[90vh] flex flex-col overflow-hidden">
+    <div className={cn(
+      "relative z-10 w-full bg-white dark:bg-neutral-900 rounded-t-3xl sm:rounded-2xl border border-neutral-100 dark:border-neutral-800 shadow-2xl max-h-[92vh] flex flex-col overflow-hidden",
+      wide ? "sm:max-w-2xl" : "sm:max-w-lg"
+    )}>
       <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-100 dark:border-neutral-800 flex-shrink-0">
         <h3 className="text-base font-bold text-neutral-900 dark:text-white">{title}</h3>
-        <button onClick={onClose} className="w-8 h-8 rounded-xl flex items-center justify-center hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors text-neutral-400 dark:text-neutral-500">
+        <button onClick={onClose} className="w-8 h-8 rounded-xl flex items-center justify-center hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors text-neutral-400">
           <X className="w-4 h-4" />
         </button>
       </div>
@@ -246,17 +359,307 @@ const Modal = ({ title, onClose, children, footer }: {
 );
 
 /* ══════════════════════════════════════════════
+   MATERIALS EDITOR
+══════════════════════════════════════════════ */
+const UNITS = ["pcs", "kg", "set", "nos", "mm", "mtr", "ltr"];
+
+const MaterialsEditor = ({
+  materials, onChange,
+}: { materials: MaterialLine[]; onChange: (m: MaterialLine[]) => void }) => {
+  const update = (id: string, key: keyof MaterialLine, val: string) => {
+    onChange(materials.map(m => m.id === id ? { ...m, [key]: val } : m));
+  };
+  const remove = (id: string) => {
+    if (materials.length === 1) return;
+    onChange(materials.filter(m => m.id !== id));
+  };
+  const add = () => onChange([...materials, newMaterial()]);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <label className={labelCls}>Materials <span className="text-red-500 ml-0.5">*</span></label>
+        <button onClick={add} type="button"
+          className="flex items-center gap-1 text-xs font-semibold text-[#EAB308] hover:text-yellow-500 transition-colors">
+          <Plus className="w-3.5 h-3.5" />Add material
+        </button>
+      </div>
+
+      <div className="rounded-xl border border-neutral-200 dark:border-neutral-700 overflow-hidden">
+        {/* Header */}
+        <div className="hidden sm:grid grid-cols-[2fr_1fr_80px_80px_32px] gap-2 px-3 py-2 bg-neutral-50 dark:bg-neutral-800 border-b border-neutral-200 dark:border-neutral-700">
+          {["Material Name", "Grade", "Qty", "Unit", ""].map(h => (
+            <span key={h} className="text-xs font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider">{h}</span>
+          ))}
+        </div>
+
+        {materials.map((m, idx) => (
+          <div key={m.id} className={cn(
+            "grid sm:grid-cols-[2fr_1fr_80px_80px_32px] gap-2 p-3",
+            idx !== 0 && "border-t border-neutral-100 dark:border-neutral-800"
+          )}>
+            {/* Mobile label */}
+            {materials.length > 1 && (
+              <div className="sm:hidden col-span-full flex items-center justify-between mb-1">
+                <span className="text-xs font-semibold text-neutral-400">Material {idx + 1}</span>
+                {materials.length > 1 && (
+                  <button onClick={() => remove(m.id)} className="text-red-400 hover:text-red-500 transition-colors">
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            )}
+            <input
+              value={m.material_name}
+              onChange={e => update(m.id, "material_name", e.target.value)}
+              placeholder="e.g. Core insert"
+              className={inputCls}
+            />
+            <input
+              value={m.material_grade}
+              onChange={e => update(m.id, "material_grade", e.target.value)}
+              placeholder="SKD-11"
+              className={inputCls}
+            />
+            <input
+              type="number"
+              value={m.quantity}
+              onChange={e => update(m.id, "quantity", e.target.value)}
+              placeholder="0"
+              className={inputCls}
+            />
+            <select value={m.unit} onChange={e => update(m.id, "unit", e.target.value)} className={inputCls}>
+              {UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+            </select>
+            <div className="hidden sm:flex items-center justify-center">
+              {materials.length > 1 && (
+                <button onClick={() => remove(m.id)}
+                  className="w-7 h-7 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center justify-center text-neutral-300 hover:text-red-400 transition-colors">
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {materials.length === 0 && (
+        <button onClick={add} type="button"
+          className="w-full py-3 rounded-xl border-2 border-dashed border-neutral-200 dark:border-neutral-700 text-sm text-neutral-400 hover:border-[#EAB308]/50 hover:text-[#EAB308] transition-colors">
+          + Add first material
+        </button>
+      )}
+    </div>
+  );
+};
+
+/* ══════════════════════════════════════════════
+   3-COPY PRINTABLE CHALLAN
+══════════════════════════════════════════════ */
+const ChallanModal = ({ job, onClose }: { job: JobWork; onClose: () => void }) => {
+  const materials = getMaterialsList(job);
+  const companyName = "YOUR COMPANY NAME";
+  const companyAddress = "Company Address Line 1, City - PIN";
+  const copies = ["Recipient Copy", "Transporter Copy", "Company Copy"];
+
+  const handlePrint = () => {
+    const printContent = document.getElementById("challan-print-area");
+    if (!printContent) return;
+    const win = window.open("", "_blank");
+    if (!win) return;
+    win.document.write(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <title>Job Work Challan - ${job.doc_no ?? "JW"}</title>
+          <style>
+            * { box-sizing: border-box; margin: 0; padding: 0; }
+            body { font-family: 'Arial', sans-serif; font-size: 11px; color: #000; background: #fff; }
+            .copy { page-break-after: always; border: 2px solid #000; margin: 12px; padding: 0; }
+            .copy:last-child { page-break-after: avoid; }
+            .copy-header { background: #1a1a1a; color: #fff; padding: 10px 14px; display: flex; justify-content: space-between; align-items: center; }
+            .company-name { font-size: 14px; font-weight: 700; letter-spacing: 0.5px; }
+            .copy-label { font-size: 10px; font-weight: 600; background: #EAB308; color: #000; padding: 3px 8px; border-radius: 3px; }
+            .challan-title { text-align: center; padding: 8px; border-bottom: 1px solid #ddd; font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
+            .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+            .info-box { padding: 8px 12px; border-right: 1px solid #ddd; border-bottom: 1px solid #ddd; }
+            .info-box:nth-child(even) { border-right: none; }
+            .info-label { font-size: 8.5px; font-weight: 700; text-transform: uppercase; color: #666; margin-bottom: 2px; letter-spacing: 0.5px; }
+            .info-value { font-size: 11px; font-weight: 600; color: #000; }
+            table { width: 100%; border-collapse: collapse; }
+            th { background: #f5f5f5; padding: 6px 10px; text-align: left; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; border: 1px solid #ddd; }
+            td { padding: 6px 10px; border: 1px solid #ddd; font-size: 10.5px; }
+            .section-title { padding: 6px 12px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: #555; background: #fafafa; border-bottom: 1px solid #ddd; border-top: 1px solid #ddd; }
+            .sigs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0; border-top: 2px solid #000; }
+            .sig-box { padding: 16px 12px 8px; border-right: 1px solid #ddd; }
+            .sig-box:last-child { border-right: none; }
+            .sig-line { border-top: 1px solid #555; margin-top: 28px; padding-top: 4px; font-size: 9px; color: #666; text-align: center; }
+            .cut-line { text-align: center; color: #999; font-size: 9px; padding: 2px 0; border-top: 1px dashed #ccc; margin: 0 12px; }
+          </style>
+        </head>
+        <body>
+          ${copies.map((copyLabel, ci) => `
+            <div class="copy">
+              <div class="copy-header">
+                <div>
+                  <div class="company-name">${companyName}</div>
+                  <div style="font-size:9px;color:#ccc;margin-top:2px;">${companyAddress}</div>
+                </div>
+                <div class="copy-label">${copyLabel}</div>
+              </div>
+              <div class="challan-title">Job Work Delivery Challan</div>
+              <div class="info-grid">
+                <div class="info-box"><div class="info-label">Challan No.</div><div class="info-value">${job.doc_no ?? "—"}</div></div>
+                <div class="info-box"><div class="info-label">Date</div><div class="info-value">${fd(job.dispatch_date ?? job.created_at)}</div></div>
+                <div class="info-box"><div class="info-label">Supplier / Party</div><div class="info-value">${job.suppliers?.name ?? "—"}</div></div>
+                <div class="info-box"><div class="info-label">Contact Person</div><div class="info-value">${job.suppliers?.contact_person ?? "—"}</div></div>
+                <div class="info-box"><div class="info-label">Process Type</div><div class="info-value">${job.process_type ?? "—"}</div></div>
+                <div class="info-box"><div class="info-label">Division</div><div class="info-value">${job.division}</div></div>
+                <div class="info-box"><div class="info-label">Dispatch Purpose</div><div class="info-value">${job.dispatch_purpose ?? "—"}</div></div>
+                <div class="info-box"><div class="info-label">Expected Return</div><div class="info-value">${fd(job.expected_return_date)}</div></div>
+                ${job.dispatch_mode ? `<div class="info-box"><div class="info-label">Dispatch Mode</div><div class="info-value">${job.dispatch_mode}</div></div>` : ''}
+                ${job.vehicle_number ? `<div class="info-box"><div class="info-label">Vehicle No.</div><div class="info-value">${job.vehicle_number}</div></div>` : ''}
+              </div>
+              <div class="section-title">Materials</div>
+              <table>
+                <thead>
+                  <tr>
+                    <th>#</th><th>Material Description</th><th>Grade</th><th>Qty</th><th>Unit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${materials.map((m, i) => `
+                    <tr>
+                      <td>${i + 1}</td>
+                      <td>${m.material_name}</td>
+                      <td>${m.material_grade || '—'}</td>
+                      <td>${m.quantity}</td>
+                      <td>${m.unit}</td>
+                    </tr>
+                  `).join("")}
+                  ${Array(Math.max(0, 5 - materials.length)).fill(0).map(() => `
+                    <tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>
+                  `).join("")}
+                </tbody>
+              </table>
+              ${job.remarks ? `<div class="section-title">Remarks</div><div style="padding:8px 12px;font-size:11px;">${job.remarks}</div>` : ''}
+              <div class="sigs">
+                <div class="sig-box"><div class="sig-line">Prepared By</div></div>
+                <div class="sig-box"><div class="sig-line">Received By (Supplier)</div></div>
+                <div class="sig-box"><div class="sig-line">Security / Gate Out</div></div>
+              </div>
+            </div>
+            ${ci < copies.length - 1 ? '<div class="cut-line">✂ ─────── Cut Here ───────</div>' : ''}
+          `).join("")}
+        </body>
+      </html>
+    `);
+    win.document.close();
+    setTimeout(() => { win.print(); }, 400);
+  };
+
+  return (
+    <Modal title="Job Work Challan — 3 Copies" onClose={onClose} wide
+      footer={
+        <div className="flex gap-3">
+          <button onClick={onClose} className="flex-1 py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 text-sm font-medium text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors">Close</button>
+          <button onClick={handlePrint}
+            className="flex-1 py-2.5 rounded-xl bg-[#EAB308] hover:bg-yellow-500 text-black font-semibold text-sm flex items-center justify-center gap-2 transition-colors">
+            <Printer className="w-4 h-4" />Print 3 Copies
+          </button>
+        </div>
+      }>
+
+      {/* Preview of challan */}
+      <div className="space-y-4">
+        {copies.map((copyLabel, ci) => (
+          <div key={ci}>
+            <div className="rounded-xl border border-neutral-200 dark:border-neutral-700 overflow-hidden text-xs">
+              {/* Header */}
+              <div className="flex items-center justify-between px-4 py-3 bg-neutral-900 dark:bg-neutral-950">
+                <div>
+                  <p className="text-sm font-bold text-white">{companyName}</p>
+                  <p className="text-neutral-400 text-xs">{companyAddress}</p>
+                </div>
+                <span className="bg-[#EAB308] text-black text-xs font-bold px-2 py-1 rounded">{copyLabel}</span>
+              </div>
+              <div className="text-center py-2 bg-neutral-50 dark:bg-neutral-800 border-b border-neutral-200 dark:border-neutral-700">
+                <span className="text-xs font-bold uppercase tracking-widest text-neutral-600 dark:text-neutral-300">Job Work Delivery Challan</span>
+              </div>
+
+              {/* Info grid */}
+              <div className="grid grid-cols-2 divide-x divide-y divide-neutral-100 dark:divide-neutral-800">
+                {[
+                  ["Challan No.", job.doc_no ?? "—"],
+                  ["Date", fd(job.dispatch_date ?? job.created_at)],
+                  ["Supplier", job.suppliers?.name ?? "—"],
+                  ["Contact", job.suppliers?.contact_person ?? "—"],
+                  ["Process", job.process_type ?? "—"],
+                  ["Division", job.division],
+                  ["Purpose", job.dispatch_purpose ?? "—"],
+                  ["Expected Return", fd(job.expected_return_date)],
+                ].map(([l, v]) => (
+                  <div key={l} className="px-3 py-2">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-neutral-400 dark:text-neutral-500">{l}</p>
+                    <p className="font-semibold text-neutral-800 dark:text-white mt-0.5 truncate">{v}</p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Materials table */}
+              <div className="border-t border-neutral-200 dark:border-neutral-700">
+                <div className="grid grid-cols-[auto_1fr_80px_50px_50px] gap-0 bg-neutral-100 dark:bg-neutral-800 text-[10px] font-bold uppercase tracking-wide text-neutral-500 dark:text-neutral-400 px-3 py-1.5">
+                  {["#", "Material", "Grade", "Qty", "Unit"].map(h => <span key={h}>{h}</span>)}
+                </div>
+                {materials.map((m, mi) => (
+                  <div key={m.id} className={cn(
+                    "grid grid-cols-[auto_1fr_80px_50px_50px] gap-0 px-3 py-2 text-xs",
+                    mi !== 0 && "border-t border-neutral-100 dark:border-neutral-800"
+                  )}>
+                    <span className="text-neutral-400 dark:text-neutral-500 pr-3">{mi + 1}</span>
+                    <span className="font-medium text-neutral-800 dark:text-white">{m.material_name}</span>
+                    <span className="text-neutral-500 dark:text-neutral-400">{m.material_grade || "—"}</span>
+                    <span className="font-semibold">{m.quantity}</span>
+                    <span className="text-neutral-500 dark:text-neutral-400">{m.unit}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Signatures */}
+              <div className="grid grid-cols-3 divide-x divide-neutral-200 dark:divide-neutral-700 border-t-2 border-neutral-900 dark:border-neutral-200">
+                {["Prepared By", "Received By", "Security Out"].map(sig => (
+                  <div key={sig} className="px-3 py-3">
+                    <div className="h-6" />
+                    <div className="border-t border-neutral-300 dark:border-neutral-600 pt-1">
+                      <p className="text-[10px] text-neutral-400 dark:text-neutral-500 text-center">{sig}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            {ci < copies.length - 1 && (
+              <div className="flex items-center gap-2 py-1">
+                <div className="flex-1 border-t border-dashed border-neutral-300 dark:border-neutral-600" />
+                <span className="text-[10px] text-neutral-400 dark:text-neutral-500">✂ cut here</span>
+                <div className="flex-1 border-t border-dashed border-neutral-300 dark:border-neutral-600" />
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </Modal>
+  );
+};
+
+/* ══════════════════════════════════════════════
    NEW JOB WORK MODAL
 ══════════════════════════════════════════════ */
 const NewJobWorkModal = ({ onClose, onCreated }: { onClose: () => void; onCreated: (job: JobWork) => void }) => {
   const qc = useQueryClient();
+  const [materials, setMaterials] = useState<MaterialLine[]>([newMaterial()]);
   const [form, setForm] = useState({
     division: "Tool Room",
     process_type: "",
-    material_name: "",
-    material_grade: "",
-    quantity: "",
-    unit: "pcs",
     supplier_id: "",
     dispatch_purpose: "",
     responsible_person: "",
@@ -264,31 +667,32 @@ const NewJobWorkModal = ({ onClose, onCreated }: { onClose: () => void; onCreate
     remarks: "",
   });
   const [error, setError] = useState("");
+  const set = (k: string) => (v: string) => setForm(f => ({ ...f, [k]: v }));
 
   const { data: suppliers = [] } = useQuery<Supplier[]>({
     queryKey: ["suppliers-list"],
     queryFn: async () => {
-      const { data } = await supabase.from("suppliers").select("id, name, contact_person, phone").eq("is_active", true).order("name");
+      const { data } = await supabase.from("suppliers").select("id, name, contact_person, phone, address").eq("is_active", true).order("name");
       return (data ?? []) as Supplier[];
     },
   });
 
-  const set = (k: string) => (v: string) => setForm(f => ({ ...f, [k]: v }));
-
   const mutation = useMutation({
     mutationFn: async () => {
-      if (!form.material_name.trim()) throw new Error("Material name is required");
-      if (!form.quantity || isNaN(Number(form.quantity))) throw new Error("Valid quantity is required");
+      const validMats = materials.filter(m => m.material_name.trim() && m.quantity);
+      if (validMats.length === 0) throw new Error("At least one material with name and quantity is required");
 
+      const primary = validMats[0];
       const { data, error } = await supabase
         .from("job_work")
         .insert({
           division: form.division,
           process_type: form.process_type || null,
-          material_name: form.material_name.trim(),
-          material_grade: form.material_grade || null,
-          quantity: Number(form.quantity),
-          unit: form.unit || null,
+          material_name: primary.material_name.trim(),
+          material_grade: primary.material_grade || null,
+          quantity: Number(primary.quantity),
+          unit: primary.unit || null,
+          materials_list: validMats,
           supplier_id: form.supplier_id || null,
           dispatch_purpose: form.dispatch_purpose || null,
           responsible_person: form.responsible_person || null,
@@ -297,7 +701,7 @@ const NewJobWorkModal = ({ onClose, onCreated }: { onClose: () => void; onCreate
           current_step: 1,
           status: "requirement",
         })
-        .select("*, suppliers(id, name, contact_person, phone), departments(name)")
+        .select("*, suppliers(id, name, contact_person, phone, address), departments(name)")
         .single();
 
       if (error) throw error;
@@ -313,15 +717,13 @@ const NewJobWorkModal = ({ onClose, onCreated }: { onClose: () => void; onCreate
   const PROCESS_TYPES = ["Polishing", "Hardening", "CG", "Laser Welding", "CMM", "Vacuum Heat Treatment", "Other"];
 
   return (
-    <Modal title="New Job Work" onClose={onClose}
+    <Modal title="New Job Work" onClose={onClose} wide
       footer={
         <div className="flex gap-3">
           <button onClick={onClose} className="flex-1 py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 text-sm font-medium text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors">
             Cancel
           </button>
-          <button
-            onClick={() => mutation.mutate()}
-            disabled={mutation.isPending}
+          <button onClick={() => mutation.mutate()} disabled={mutation.isPending}
             className="flex-1 py-2.5 rounded-xl bg-[#EAB308] hover:bg-yellow-500 text-black font-semibold text-sm transition-colors disabled:opacity-60 flex items-center justify-center gap-2">
             {mutation.isPending ? <><Loader2 className="w-4 h-4 animate-spin" />Creating…</> : "Create Job Work"}
           </button>
@@ -352,34 +754,40 @@ const NewJobWorkModal = ({ onClose, onCreated }: { onClose: () => void; onCreate
         </div>
       </div>
 
-      {/* Process type */}
+      {/* Process */}
       <div>
         <label className={labelCls}>Process Type</label>
-        <select value={form.process_type} onChange={e => setForm(f => ({ ...f, process_type: e.target.value }))} className={inputCls}>
+        <select value={form.process_type} onChange={e => set("process_type")(e.target.value)} className={inputCls}>
           <option value="">Select process…</option>
           {PROCESS_TYPES.map(p => <option key={p} value={p}>{p}</option>)}
         </select>
       </div>
 
-      <Field label="Material Name" value={form.material_name} onChange={set("material_name")} placeholder="e.g. Core insert" required />
-      <Field label="Material Grade" value={form.material_grade} onChange={set("material_grade")} placeholder="e.g. SKD-11, NAK-80" />
-
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Quantity" type="number" value={form.quantity} onChange={set("quantity")} placeholder="0" required />
-        <Field label="Unit" type="select:pcs,kg,set,nos,mm" value={form.unit} onChange={set("unit")} />
-      </div>
-
       {/* Supplier */}
       <div>
         <label className={labelCls}>Supplier</label>
-        <select value={form.supplier_id} onChange={e => setForm(f => ({ ...f, supplier_id: e.target.value }))} className={inputCls}>
+        <select value={form.supplier_id} onChange={e => set("supplier_id")(e.target.value)} className={inputCls}>
           <option value="">Select supplier…</option>
           {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
         </select>
+        {form.supplier_id && (() => {
+          const sup = suppliers.find(s => s.id === form.supplier_id);
+          return sup ? (
+            <div className="mt-1.5 flex items-center gap-2 text-xs text-neutral-400 dark:text-neutral-500">
+              {sup.contact_person && <><User className="w-3 h-3" />{sup.contact_person}</>}
+              {sup.phone && <><Phone className="w-3 h-3" />{sup.phone}</>}
+            </div>
+          ) : null;
+        })()}
       </div>
 
-      <Field label="Dispatch Purpose" value={form.dispatch_purpose} onChange={set("dispatch_purpose")} placeholder="Purpose of dispatch" />
-      <Field label="Responsible Person" value={form.responsible_person} onChange={set("responsible_person")} placeholder="Name" />
+      {/* Materials */}
+      <MaterialsEditor materials={materials} onChange={setMaterials} />
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Dispatch Purpose" value={form.dispatch_purpose} onChange={set("dispatch_purpose")} placeholder="Purpose of dispatch" />
+        <Field label="Responsible Person" value={form.responsible_person} onChange={set("responsible_person")} placeholder="Name" />
+      </div>
       <Field label="Expected Return Date" type="date" value={form.expected_return_date} onChange={set("expected_return_date")} />
       <Field label="Remarks" type="textarea" value={form.remarks} onChange={set("remarks")} placeholder="Optional remarks…" />
     </Modal>
@@ -387,13 +795,88 @@ const NewJobWorkModal = ({ onClose, onCreated }: { onClose: () => void; onCreate
 };
 
 /* ══════════════════════════════════════════════
-   ADVANCE STEP MODAL
+   STEP FORM CONFIGS (per step)
+══════════════════════════════════════════════ */
+type StepFormField = {
+  key: string; label: string; type: string;
+  placeholder?: string; required?: boolean; helpText?: string;
+};
+
+const STEP_FORM_CONFIGS: Record<number, { title: string; description: string; fields: StepFormField[] }> = {
+  2: {
+    title: "Create Challan",
+    description: "Generate the job work delivery challan document",
+    fields: [
+      { key: "challan_url", label: "Challan Document", type: "file", helpText: "Upload the signed challan or generate & attach later" },
+    ],
+  },
+  3: {
+    title: "Security Handover",
+    description: "Record gate / security handover details",
+    fields: [
+      { key: "security_handover_by", label: "Handed over by", type: "text", placeholder: "Name of person handing over", required: true },
+      { key: "security_handover_at", label: "Handover date & time", type: "datetime-local" },
+    ],
+  },
+  4: {
+    title: "Dispatch to Supplier",
+    description: "Enter dispatch and logistics details",
+    fields: [
+      { key: "dispatch_date", label: "Dispatch date", type: "date", required: true },
+      { key: "dispatch_mode", label: "Dispatch mode", type: "select:Road,Courier,Hand Delivery,Rail" },
+      { key: "vehicle_number", label: "Vehicle number", type: "text", placeholder: "e.g. MH 12 AB 1234" },
+      { key: "delivery_person_name", label: "Delivery person", type: "text", placeholder: "Name" },
+      { key: "outward_challan_url", label: "Outward challan", type: "file" },
+      { key: "expected_return_date", label: "Expected return date", type: "date" },
+      { key: "tat_days", label: "TAT (days)", type: "number", placeholder: "e.g. 7" },
+    ],
+  },
+  5: {
+    title: "Mark In Process",
+    description: "Confirm material is being processed at supplier",
+    fields: [],
+  },
+  6: {
+    title: "Material Returned",
+    description: "Record quantity received and return details",
+    fields: [
+      { key: "return_date", label: "Return date", type: "date", required: true },
+      { key: "received_qty", label: "Received quantity", type: "number", required: true, placeholder: "Enter qty" },
+    ],
+  },
+  7: {
+    title: "Ref Person Approval",
+    description: "Reference person verification and sign-off",
+    fields: [
+      { key: "ref_person_remarks", label: "Remarks", type: "textarea", placeholder: "Inspection notes or approval remarks…" },
+    ],
+  },
+  8: {
+    title: "High Authority Approval",
+    description: "Final approval by high authority",
+    fields: [
+      { key: "high_authority_remarks", label: "HA Remarks", type: "textarea", placeholder: "Final approval remarks…" },
+    ],
+  },
+  9: {
+    title: "Close & Invoice",
+    description: "Upload invoice and close this job work",
+    fields: [
+      { key: "invoice_number", label: "Invoice number", type: "text", placeholder: "INV-0001" },
+      { key: "invoice_amount", label: "Invoice amount (₹)", type: "number", placeholder: "0.00" },
+      { key: "invoice_url", label: "Invoice document", type: "file" },
+    ],
+  },
+};
+
+/* ══════════════════════════════════════════════
+   ADVANCE STEP MODAL (improved)
 ══════════════════════════════════════════════ */
 const AdvanceStepModal = ({ job, onClose }: { job: JobWork; onClose: (updated?: JobWork) => void }) => {
   const qc = useQueryClient();
   const nextStep = (job.current_step ?? 1) + 1;
   const nextStepInfo = STEPS[nextStep - 1];
-  const extraFields = STEP_FIELDS[nextStep] ?? [];
+  const config = STEP_FORM_CONFIGS[nextStep];
   const [fields, setFields] = useState<Record<string, string>>({});
   const [remarks, setRemarks] = useState("");
   const [error, setError] = useState("");
@@ -402,23 +885,22 @@ const AdvanceStepModal = ({ job, onClose }: { job: JobWork; onClose: (updated?: 
 
   const mutation = useMutation({
     mutationFn: async () => {
-      // Validate required
-      for (const f of extraFields) {
-        if (f.required && !fields[f.key]) throw new Error(`${f.label} is required`);
+      if (config) {
+        for (const f of config.fields) {
+          if (f.required && !fields[f.key]) throw new Error(`${f.label} is required`);
+        }
       }
       const payload = buildStepPayload(nextStep, fields, job);
       if (remarks) payload.remarks = remarks;
 
-      // Also log a step_doc entry
       const { data, error } = await supabase
         .from("job_work")
         .update(payload)
         .eq("id", job.id)
-        .select("*, suppliers(id, name, contact_person, phone), departments(name)")
+        .select("*, suppliers(id, name, contact_person, phone, address), departments(name)")
         .single();
       if (error) throw error;
 
-      // Insert step doc record
       await supabase.from("job_work_step_docs").upsert({
         job_work_id: job.id,
         step_number: nextStep,
@@ -438,16 +920,16 @@ const AdvanceStepModal = ({ job, onClose }: { job: JobWork; onClose: (updated?: 
 
   if (!nextStepInfo) return null;
 
+  const StepIcon = nextStepInfo.icon;
+
   return (
-    <Modal
-      title={`Advance to Step ${nextStep}: ${nextStepInfo.label}`}
-      onClose={() => onClose()}
+    <Modal title="Update Status" onClose={() => onClose()} wide
       footer={
         <div className="flex gap-3">
           <button onClick={() => onClose()} className="flex-1 py-2.5 rounded-xl border border-neutral-200 dark:border-neutral-700 text-sm font-medium text-neutral-600 dark:text-neutral-400 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors">Cancel</button>
           <button onClick={() => mutation.mutate()} disabled={mutation.isPending}
             className="flex-1 py-2.5 rounded-xl bg-[#EAB308] hover:bg-yellow-500 text-black font-semibold text-sm transition-colors disabled:opacity-60 flex items-center justify-center gap-2">
-            {mutation.isPending ? <><Loader2 className="w-4 h-4 animate-spin" />Updating…</> : <>Mark as {nextStepInfo.label}</>}
+            {mutation.isPending ? <><Loader2 className="w-4 h-4 animate-spin" />Updating…</> : <><Check className="w-4 h-4" />Confirm</>}
           </button>
         </div>
       }>
@@ -459,32 +941,116 @@ const AdvanceStepModal = ({ job, onClose }: { job: JobWork; onClose: (updated?: 
         </div>
       )}
 
-      {/* Current → Next indicator */}
-      <div className="flex items-center gap-2 p-3 bg-neutral-50 dark:bg-neutral-800 rounded-xl">
-        <div className="text-center flex-1">
-          <p className="text-xs text-neutral-400 dark:text-neutral-500">Current</p>
-          <p className="text-sm font-semibold text-neutral-700 dark:text-neutral-200">{STEPS[(job.current_step ?? 1) - 1]?.label}</p>
+      {/* Step progress indicator */}
+      <div className="relative">
+        {/* Mini step bar */}
+        <div className="flex items-center gap-1 mb-4 overflow-x-auto pb-2 scrollbar-hide">
+          {STEPS.map((s, i) => {
+            const done = (job.current_step ?? 1) > s.n;
+            const cur = (job.current_step ?? 1) === s.n;
+            const next = nextStep === s.n;
+            return (
+              <div key={s.n} className="flex items-center gap-1 flex-shrink-0">
+                <div className={cn(
+                  "w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold transition-all border",
+                  done ? "bg-[#EAB308] border-[#EAB308] text-black"
+                    : next ? "bg-white dark:bg-neutral-900 border-[#EAB308] text-[#EAB308] ring-2 ring-[#EAB308]/20"
+                      : cur ? "bg-neutral-200 dark:bg-neutral-700 border-neutral-300 dark:border-neutral-600 text-neutral-600 dark:text-neutral-300"
+                        : "bg-white dark:bg-neutral-900 border-neutral-200 dark:border-neutral-700 text-neutral-300 dark:text-neutral-600"
+                )}>
+                  {done ? <Check className="w-3 h-3" strokeWidth={3} /> : s.n}
+                </div>
+                {i < STEPS.length - 1 && (
+                  <div className={cn("h-px w-4", done ? "bg-[#EAB308]" : "bg-neutral-200 dark:bg-neutral-700")} />
+                )}
+              </div>
+            );
+          })}
         </div>
-        <ArrowRight className="w-4 h-4 text-[#EAB308] flex-shrink-0" />
-        <div className="text-center flex-1">
-          <p className="text-xs text-neutral-400 dark:text-neutral-500">Advancing to</p>
-          <p className="text-sm font-semibold text-[#EAB308]">{nextStepInfo.label}</p>
+
+        {/* Advancing to box */}
+        <div className="p-4 bg-yellow-50 dark:bg-yellow-900/10 border border-yellow-100 dark:border-yellow-900/30 rounded-2xl">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-[#EAB308]/20 dark:bg-yellow-900/30 flex items-center justify-center flex-shrink-0">
+              <StepIcon className="w-5 h-5 text-[#EAB308]" strokeWidth={1.8} />
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-yellow-700 dark:text-yellow-400 uppercase tracking-wide">Advancing to Step {nextStep}</p>
+              <p className="text-base font-bold text-neutral-900 dark:text-white">{config?.title ?? nextStepInfo.label}</p>
+              {config?.description && <p className="text-sm text-neutral-500 dark:text-neutral-400 mt-0.5">{config.description}</p>}
+            </div>
+          </div>
         </div>
       </div>
 
       {/* Step-specific fields */}
-      {extraFields.map(f => (
-        <Field
-          key={f.key}
-          label={f.label}
-          type={f.type}
-          value={fields[f.key] ?? ""}
-          onChange={setF(f.key)}
-          required={f.required}
-        />
-      ))}
+      {config && config.fields.length > 0 && (
+        <div className="space-y-3">
+          {config.fields.map(f => {
+            if (f.type === "file") {
+              return (
+                <FileUploadField
+                  key={f.key}
+                  label={f.label}
+                  value={fields[f.key] ?? ""}
+                  onChange={setF(f.key)}
+                  folder={`job-work/${job.id}`}
+                  accept=".pdf,.jpg,.jpeg,.png,.docx"
+                  required={f.required}
+                />
+              );
+            }
+            return (
+              <Field
+                key={f.key}
+                label={f.label}
+                type={f.type}
+                value={fields[f.key] ?? ""}
+                onChange={setF(f.key)}
+                placeholder={f.placeholder}
+                required={f.required}
+              />
+            );
+          })}
+        </div>
+      )}
 
-      <Field label="Step Remarks (optional)" type="textarea" value={remarks} onChange={setRemarks} placeholder="Any notes for this step…" />
+      {/* Step 5 info - no extra fields needed */}
+      {nextStep === 5 && (
+        <div className="p-4 bg-neutral-50 dark:bg-neutral-800 rounded-xl text-center">
+          <Clock className="w-8 h-8 text-yellow-400 mx-auto mb-2" strokeWidth={1.5} />
+          <p className="text-sm font-medium text-neutral-700 dark:text-neutral-200">Confirm material is currently being processed at the supplier</p>
+          <p className="text-xs text-neutral-400 dark:text-neutral-500 mt-1">No additional data needed for this step</p>
+        </div>
+      )}
+
+      {/* Step 7 approval confirm */}
+      {nextStep === 7 && (
+        <div className="flex items-center gap-2.5 p-3.5 bg-purple-50 dark:bg-purple-900/10 border border-purple-100 dark:border-purple-900/30 rounded-xl">
+          <User className="w-4 h-4 text-purple-500 flex-shrink-0" />
+          <p className="text-sm text-purple-700 dark:text-purple-300">
+            This will mark <span className="font-semibold">Ref Person Approval</span> as complete
+          </p>
+        </div>
+      )}
+
+      {/* Step 8 approval confirm */}
+      {nextStep === 8 && (
+        <div className="flex items-center gap-2.5 p-3.5 bg-green-50 dark:bg-green-900/10 border border-green-100 dark:border-green-900/30 rounded-xl">
+          <BadgeCheck className="w-4 h-4 text-green-500 flex-shrink-0" />
+          <p className="text-sm text-green-700 dark:text-green-300">
+            This will mark <span className="font-semibold">High Authority Approval</span> as complete
+          </p>
+        </div>
+      )}
+
+      {/* Remarks field for all steps */}
+      <div>
+        <label className={labelCls}>Step remarks <span className="text-neutral-300 dark:text-neutral-600">(optional)</span></label>
+        <textarea value={remarks} onChange={e => setRemarks(e.target.value)}
+          rows={2} placeholder="Any notes for this step…"
+          className={cn(inputCls, "resize-none")} />
+      </div>
     </Modal>
   );
 };
@@ -550,7 +1116,6 @@ const LogCommModal = ({ jobId, onClose }: { jobId: string; onClose: () => void }
         </div>
       )}
 
-      {/* Type selector */}
       <div>
         <label className={labelCls}>Communication type</label>
         <div className="grid grid-cols-4 gap-2">
@@ -571,7 +1136,6 @@ const LogCommModal = ({ jobId, onClose }: { jobId: string; onClose: () => void }
       <Field label="Contact person" value={form.contact_person} onChange={set("contact_person") as any} placeholder="Who did you speak with?" />
       <Field label="Notes" type="textarea" value={form.notes} onChange={set("notes") as any} placeholder="What was discussed?" required />
 
-      {/* Follow up */}
       <div>
         <label className="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" checked={form.follow_up_needed}
@@ -635,7 +1199,7 @@ const Timeline = ({ job, docs }: { job: JobWork; docs: any[] }) => {
                   {doc?.doc_url && (
                     <a href={doc.doc_url} target="_blank" rel="noopener noreferrer"
                       className="inline-flex items-center gap-1 text-xs text-[#EAB308] hover:underline mt-1">
-                      <FileText className="w-3 h-3" />View document
+                      <Paperclip className="w-3 h-3" />View document
                     </a>
                   )}
                   {doc?.remarks && <p className="text-xs text-neutral-400 dark:text-neutral-500 italic mt-0.5">{doc.remarks}</p>}
@@ -664,8 +1228,10 @@ const Detail = ({ job: initialJob, onBack }: { job: JobWork; onBack: () => void 
   const [job, setJob] = useState(initialJob);
   const [showAdvance, setShowAdvance] = useState(false);
   const [showLogComm, setShowLogComm] = useState(false);
+  const [showChallan, setShowChallan] = useState(false);
   const { label, cls } = getStatus(job);
   const canAdvance = (job.current_step ?? 1) < 9;
+  const materials = getMaterialsList(job);
 
   const { data: docs = [] } = useQuery({
     queryKey: ["jw-docs", job.id],
@@ -715,8 +1281,15 @@ const Detail = ({ job: initialJob, onBack }: { job: JobWork; onBack: () => void 
             </p>
           </div>
 
-          {/* Action buttons */}
           <div className="flex gap-2 flex-shrink-0">
+            {/* Challan button - show when step >= 2 */}
+            {(job.current_step ?? 1) >= 2 && (
+              <button onClick={() => setShowChallan(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors text-sm font-medium text-neutral-600 dark:text-neutral-400">
+                <Printer className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Challan</span>
+              </button>
+            )}
             <button onClick={() => setShowLogComm(true)}
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-neutral-200 dark:border-neutral-700 bg-white dark:bg-neutral-900 hover:bg-neutral-50 dark:hover:bg-neutral-800 transition-colors text-sm font-medium text-neutral-600 dark:text-neutral-400">
               <MessageSquare className="w-3.5 h-3.5" />
@@ -733,7 +1306,7 @@ const Detail = ({ job: initialJob, onBack }: { job: JobWork; onBack: () => void 
           </div>
         </div>
 
-        {/* Step progress bar */}
+        {/* Progress bar */}
         <div className="rounded-2xl bg-white dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-800 px-5 py-4">
           <div className="flex items-center justify-between mb-3">
             <p className="text-sm font-semibold text-neutral-700 dark:text-neutral-200">Progress</p>
@@ -747,7 +1320,6 @@ const Detail = ({ job: initialJob, onBack }: { job: JobWork; onBack: () => void 
               style={{ width: `${Math.round(((job.current_step ?? 1) / 9) * 100)}%` }}
             />
           </div>
-          {/* Step dots */}
           <div className="flex justify-between mt-3">
             {STEPS.map(s => (
               <div key={s.n} title={s.label} className={cn(
@@ -761,7 +1333,7 @@ const Detail = ({ job: initialJob, onBack }: { job: JobWork; onBack: () => void 
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 items-start">
-          {/* LEFT: Timeline + Comms */}
+          {/* LEFT */}
           <div className="lg:col-span-3 space-y-4">
             <SC title="Trip Info" icon={Truck}
               action={
@@ -819,16 +1391,35 @@ const Detail = ({ job: initialJob, onBack }: { job: JobWork; onBack: () => void 
             </SC>
           </div>
 
-          {/* RIGHT: Details */}
+          {/* RIGHT */}
           <div className="lg:col-span-2 space-y-4">
-            <SC title="Material-Details" icon={Package}>
-              <DR label="Material" value={job.material_name} />
-              <DR label="Grade" value={job.material_grade} />
-              <DR label="Quantity" value={`${job.quantity}${job.unit ? " " + job.unit : ""}`} />
-              <DR label="Division" value={job.division} />
-              <DR label="Process" value={job.process_type} />
-              <DR label="Supplier" value={job.suppliers?.name} />
-              <DR label="Purpose" value={job.dispatch_purpose} />
+            {/* Materials list */}
+            <SC title="Materials" icon={Package}>
+              <div className="space-y-0">
+                {materials.map((m, i) => (
+                  <div key={m.id} className={cn(
+                    "flex items-center justify-between py-2.5 gap-4",
+                    i !== 0 && "border-t border-neutral-100 dark:border-neutral-800"
+                  )}>
+                    <div className="flex items-start gap-2 min-w-0">
+                      <span className="mt-0.5 w-4 h-4 rounded-full bg-neutral-100 dark:bg-neutral-800 text-[10px] font-bold text-neutral-400 dark:text-neutral-500 flex items-center justify-center flex-shrink-0">{i + 1}</span>
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-neutral-800 dark:text-white">{m.material_name}</p>
+                        {m.material_grade && <p className="text-xs text-neutral-400 dark:text-neutral-500">{m.material_grade}</p>}
+                      </div>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <p className="text-sm font-bold text-neutral-800 dark:text-white">{m.quantity}</p>
+                      <p className="text-xs text-neutral-400 dark:text-neutral-500">{m.unit}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="border-t border-neutral-100 dark:border-neutral-800 pt-2.5 mt-1 space-y-0">
+                <DR label="Division" value={job.division} />
+                <DR label="Process" value={job.process_type} />
+                <DR label="Purpose" value={job.dispatch_purpose} />
+              </div>
             </SC>
 
             <SC title="Sender Details" icon={User}>
@@ -845,6 +1436,12 @@ const Detail = ({ job: initialJob, onBack }: { job: JobWork; onBack: () => void 
               <DR label="Delivery By" value={job.delivery_person_name} />
               <DR label="Expected Return" value={fd(job.expected_return_date)} />
               <DR label="TAT" value={job.tat_days ? `${job.tat_days} days` : null} />
+              {job.outward_challan_url && (
+                <a href={job.outward_challan_url} target="_blank" rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 text-xs text-[#EAB308] hover:underline mt-2 pt-2 border-t border-neutral-100 dark:border-neutral-800">
+                  <Paperclip className="w-3.5 h-3.5" />Outward Challan
+                </a>
+              )}
             </SC>
 
             {(job.current_step ?? 1) >= 6 && (
@@ -857,7 +1454,7 @@ const Detail = ({ job: initialJob, onBack }: { job: JobWork; onBack: () => void 
                 {job.invoice_url && (
                   <a href={job.invoice_url} target="_blank" rel="noopener noreferrer"
                     className="flex items-center gap-1.5 text-xs text-[#EAB308] hover:underline mt-2 pt-2 border-t border-neutral-100 dark:border-neutral-800">
-                    <FileText className="w-3.5 h-3.5" />View Invoice
+                    <Paperclip className="w-3.5 h-3.5" />View Invoice
                   </a>
                 )}
               </SC>
@@ -873,7 +1470,6 @@ const Detail = ({ job: initialJob, onBack }: { job: JobWork; onBack: () => void 
         </div>
       </div>
 
-      {/* Modals */}
       {showAdvance && (
         <AdvanceStepModal job={job} onClose={updated => {
           setShowAdvance(false);
@@ -881,6 +1477,7 @@ const Detail = ({ job: initialJob, onBack }: { job: JobWork; onBack: () => void 
         }} />
       )}
       {showLogComm && <LogCommModal jobId={job.id} onClose={() => setShowLogComm(false)} />}
+      {showChallan && <ChallanModal job={job} onClose={() => setShowChallan(false)} />}
     </>
   );
 };
@@ -891,6 +1488,7 @@ const Detail = ({ job: initialJob, onBack }: { job: JobWork; onBack: () => void 
 const Row = ({ job, onClick }: { job: JobWork; onClick: () => void }) => {
   const step = job.current_step ?? 1;
   const pct = Math.round((step / 9) * 100);
+  const materials = getMaterialsList(job);
   return (
     <div onClick={onClick}
       className="flex items-center gap-4 px-5 py-4 hover:bg-neutral-50 dark:hover:bg-neutral-800/40 cursor-pointer transition-colors border-b border-neutral-100 dark:border-neutral-800 last:border-0 group">
@@ -905,8 +1503,12 @@ const Row = ({ job, onClick }: { job: JobWork; onClick: () => void }) => {
           )}
         </div>
         <p className="text-sm font-semibold text-neutral-800 dark:text-white truncate">
-          {job.material_name}
-          {job.material_grade && <span className="font-normal text-neutral-400 dark:text-neutral-500"> · {job.material_grade}</span>}
+          {materials.length > 1
+            ? `${materials[0].material_name} + ${materials.length - 1} more`
+            : materials[0]?.material_name ?? job.material_name}
+          {materials.length === 1 && materials[0]?.material_grade && (
+            <span className="font-normal text-neutral-400 dark:text-neutral-500"> · {materials[0].material_grade}</span>
+          )}
         </p>
         <p className="text-xs text-neutral-400 dark:text-neutral-500 mt-0.5 truncate">
           {[job.division, job.process_type, job.suppliers?.name].filter(Boolean).join(" · ")}
@@ -952,7 +1554,7 @@ export default function ProcurementJobWorkPage() {
     queryFn: async () => {
       const { data } = await supabase
         .from("job_work")
-        .select("*, suppliers(id, name, contact_person, phone), departments(name)")
+        .select("*, suppliers(id, name, contact_person, phone, address), departments(name)")
         .order("created_at", { ascending: false });
       return (data ?? []) as JobWork[];
     },
@@ -965,8 +1567,9 @@ export default function ProcurementJobWorkPage() {
     if (divFilter !== "all" && j.division !== divFilter) return false;
     if (search) {
       const q = search.toLowerCase();
+      const materials = getMaterialsList(j);
       return (
-        j.material_name.toLowerCase().includes(q) ||
+        materials.some(m => m.material_name.toLowerCase().includes(q)) ||
         (j.doc_no ?? "").toLowerCase().includes(q) ||
         (j.process_type ?? "").toLowerCase().includes(q) ||
         (j.suppliers?.name ?? "").toLowerCase().includes(q)
@@ -984,8 +1587,6 @@ export default function ProcurementJobWorkPage() {
   return (
     <>
       <div className="space-y-5 pb-8">
-
-        {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <h1 className="text-xl font-bold text-neutral-900 dark:text-white">Job Work</h1>
@@ -1000,7 +1601,6 @@ export default function ProcurementJobWorkPage() {
           </button>
         </div>
 
-        {/* Overdue alert */}
         {overdueCount > 0 && (
           <div className="flex items-center gap-3 bg-red-50 dark:bg-red-900/15 border border-red-100 dark:border-red-900/30 rounded-2xl px-4 py-3">
             <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" strokeWidth={1.8} />
@@ -1010,7 +1610,6 @@ export default function ProcurementJobWorkPage() {
           </div>
         )}
 
-        {/* Stats */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
             { label: "Total", value: jobs.length, color: "text-neutral-900 dark:text-white" },
@@ -1025,10 +1624,7 @@ export default function ProcurementJobWorkPage() {
           ))}
         </div>
 
-        {/* List card */}
         <div className="rounded-2xl bg-white dark:bg-neutral-900 border border-neutral-100 dark:border-neutral-800 overflow-hidden">
-
-          {/* Toolbar */}
           <div className="px-5 py-4 border-b border-neutral-100 dark:border-neutral-800 space-y-3">
             <div className="flex gap-0.5 bg-neutral-100 dark:bg-neutral-800 p-1 rounded-xl w-fit">
               {(["active", "closed"] as const).map(t => (
@@ -1064,7 +1660,6 @@ export default function ProcurementJobWorkPage() {
             </div>
           </div>
 
-          {/* Column header */}
           <div className="hidden md:grid grid-cols-[1fr_160px_100px_20px] gap-4 px-5 py-2 border-b border-neutral-50 dark:border-neutral-800/60 bg-neutral-50/50 dark:bg-neutral-800/20">
             <span className="text-xs font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider">Material / Details</span>
             <span className="text-xs font-semibold text-neutral-400 dark:text-neutral-500 uppercase tracking-wider">Progress</span>
@@ -1107,7 +1702,6 @@ export default function ProcurementJobWorkPage() {
         </div>
       </div>
 
-      {/* New Job Work modal */}
       {showNew && (
         <NewJobWorkModal
           onClose={() => setShowNew(false)}

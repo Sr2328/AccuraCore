@@ -1,4 +1,6 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
+
+
 
 @tailwind base;
 @tailwind components;
@@ -91,6 +93,7 @@
   * {
     @apply border-border;
   }
+
   body {
     @apply bg-background text-foreground font-sans antialiased;
     font-family: var(--font-sans);
@@ -101,12 +104,15 @@
   .gradient-primary {
     background: var(--gradient-primary);
   }
+
   .gradient-dark {
     background: var(--gradient-dark);
   }
+
   .shadow-card {
     box-shadow: var(--shadow-card);
   }
+
   .shadow-elevated {
     box-shadow: var(--shadow-elevated);
   }
